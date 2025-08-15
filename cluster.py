@@ -120,21 +120,16 @@ def _(contact_pairs):
                 print(f"\tContact: {u} ↔ {v}")
                 print(f"\t\tOrganism: {attrs['organism']}")
                 print(f"\t\tLocation: {attrs['location']}")
-    return G, u, v
+    return (G,)
 
 
 @app.cell
-def _(G, u, v):
+def _(G):
     from pyvis.network import Network
 
-    net = Network(notebook=True, height="700px", width="100%", bgcolor="white", font_color="black",cdn_resources="in_line")
-
-    for x, y, data in G.edges(data=True):
-        net.add_node(u, label=u)
-        net.add_node(v, label=v)
-        net.add_edge(u, v, title=f"{data['organism']} @ {data['location']}")
-
-    net.show("clusters.html")
+    nt = Network(notebook=True, height="700px", width="700px", cdn_resources='remote')
+    nt.from_nx(G)
+    nt.show("clusters.html")
     return
 
 
