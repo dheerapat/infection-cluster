@@ -1,0 +1,24 @@
+<h1>{{ title() }}</h1>
+<div>
+  <label>Transfer CSV:</label>
+  <input type="file" (change)="onTransferFile($event)" accept=".csv" />
+</div>
+
+<div>
+  <label>Microbiology CSV:</label>
+  <input type="file" (change)="onMicroFile($event)" accept=".csv" />
+</div>
+
+<div>
+  <button (click)="submit()" [disabled]="loading">Submit</button>
+</div>
+
+<div *ngIf="loading">Processing...</div>
+
+<div *ngIf="result">
+  <h2>Cluster Graph</h2>
+  <div id="graph"></div>
+
+  <h2>Summary</h2>
+  <pre>{{ result.summary }}</pre>
+</div>

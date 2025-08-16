@@ -1,32 +1,37 @@
-import marimo
+import io
+import polars as pl
+import networkx as nx
+from datetime import timedelta
+from fastapi import FastAPI, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
-__generated_with = "0.14.17"
-app = marimo.App(width="medium")
+app = FastAPI()
+
+origins = [
+    "http://localhost",
+    "http://localhost:4200",
+    "http://127.0.0.1:4200",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.cell
-def _():
-    import polars as pl
-    from datetime import timedelta
-
-    transfers = pl.read_csv("transfers.csv", try_parse_dates=True)
-    print(transfers)
-    micro = pl.read_csv("microbiology.csv", try_parse_dates=True)
+@app.post("/cluster")
+async def generate_cluster(transfer_file: UploadFile, micro_file: UploadFile):
+    transfers = pl.read_csv(
+        io.BytesIO(await transfer_file.read()), try_parse_dates=True
+    )
+    micro = pl.read_csv(io.BytesIO(await micro_file.read()), try_parse_dates=True)
 
     micro = micro.filter(pl.col("result") == "positive")
-    print(micro)
-    return micro, pl, timedelta, transfers
-
-
-@app.cell
-def _(micro, transfers):
     patient_visits = micro.join(transfers, on="patient_id", how="inner")
-    print(patient_visits)
-    return (patient_visits,)
 
-
-@app.cell
-def _(patient_visits, pl, timedelta):
     pv1 = patient_visits.select(
         [
             pl.col("patient_id").alias("patient_id_1"),
@@ -50,18 +55,11 @@ def _(patient_visits, pl, timedelta):
     )
 
     contact_pairs = pv1.join(pv2, how="cross").filter(
-        # different patient && deduplication
         (pl.col("patient_id_1") != pl.col("patient_id_2"))
         & (pl.col("patient_id_1") < pl.col("patient_id_2"))
-        &
-        # same infection
-        (pl.col("infection_1") == pl.col("infection_2"))
-        &
-        # same ward
-        (pl.col("location_1") == pl.col("location_2"))
-        &
-        # overlapping ward stay within +- 14 days from collection date
-        (
+        & (pl.col("infection_1") == pl.col("infection_2"))
+        & (pl.col("location_1") == pl.col("location_2"))
+        & (
             pl.max_horizontal("ward_in_time_1", "ward_in_time_2")
             <= pl.col("collection_date_1") + timedelta(days=14)
         )
@@ -79,20 +77,7 @@ def _(patient_visits, pl, timedelta):
         )
     )
 
-    contact_pairs.write_csv("contact.csv")
-
-    with pl.Config() as contact_cfg:
-        contact_cfg.set_tbl_cols(-1)
-        print(contact_pairs)
-        print(contact_pairs.iter_rows())
-    return (contact_pairs,)
-
-
-@app.cell
-def _(contact_pairs):
-    import networkx as nx
-
-    def find_simple_clusters(df):
+    def find_simple_clusters(df: pl.DataFrame):
         G = nx.Graph()
         for row in df.iter_rows():
             G.add_edge(
@@ -106,48 +91,48 @@ def _(contact_pairs):
 
     clusters, G = find_simple_clusters(contact_pairs)
 
-    print(f"\nFound {len(clusters)} clusters:")
-    for i, cluster in enumerate(clusters, start=1):
-        if len(cluster) >= 2:
-            cluster_nodes = list(cluster)
-            print(f"\nCluster {i}: {cluster_nodes} (size: {len(cluster_nodes)})")
+    def graph_to_json(G: nx.Graph, clusters):
+        summary_lines = []
+        for i, cluster in enumerate(clusters, start=1):
+            if len(cluster) >= 2:
+                cluster_nodes = list(cluster)
+                summary_lines.append(
+                    f"\nCluster {i}: {cluster_nodes} (size: {len(cluster_nodes)})"
+                )
 
             # Get all edges in this cluster and their attributes
             cluster_edges = G.subgraph(cluster).edges(data=True)
             for u, v, attrs in cluster_edges:
-                print(f"\tContact: {u} ↔ {v}")
-                print(f"\t\tOrganism: {attrs['organism']}")
-                print(f"\t\tLocation: {attrs['location']}")
+                summary_lines.append(f"\tContact: {u} ↔ {v}")
+                summary_lines.append(f"\t\tOrganism: {attrs['organism']}")
+                summary_lines.append(f"\t\tLocation: {attrs['location']}")
 
-    import json
-
-    def graph_to_json(G):
+        summary_text = "\n".join(summary_lines)
         graph_data = {
             "nodes": [{"id": node} for node in G.nodes()],
             "edges": [
-                {
-                    "source": u,
-                    "target": v,
-                    **attrs,
-                }
+                {"source": u, "target": v, **attrs}
                 for u, v, attrs in G.edges(data=True)
             ],
+            "clusters": [
+                {
+                    "id": i + 1,
+                    "size": len(cluster),
+                    "nodes": list(cluster),
+                    "edges": [
+                        {
+                            "source": u,
+                            "target": v,
+                            **attrs,
+                        }
+                        for u, v, attrs in G.subgraph(cluster).edges(data=True)
+                    ],
+                }
+                for i, cluster in enumerate(clusters)
+                if len(cluster) >= 2
+            ],
+            "summary": summary_text,
         }
-        return json.dumps(graph_data, indent=2)
+        return graph_data
 
-    print(graph_to_json(G))
-    return (G,)
-
-
-@app.cell
-def _(G):
-    from pyvis.network import Network
-
-    nt = Network(notebook=True, height="700px", width="700px", cdn_resources="remote")
-    nt.from_nx(G)
-    nt.show("clusters.html")
-    return
-
-
-if __name__ == "__main__":
-    app.run()
+    return graph_to_json(G, clusters)
